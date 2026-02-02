@@ -165,7 +165,7 @@ mod internal {
             if log {
                 eprintln!("{}", msg);
             }
-            if let Err(e) = ureq::post(&url).send_string(msg) {
+            if let Err(e) = ureq::post(&url).send(msg) {
                 eprintln!("Error sending finishing request to healthchecks: {}", e);
                 exit(EXIT_CODE)
             }
