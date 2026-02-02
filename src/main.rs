@@ -275,20 +275,14 @@ fn main() {
         if let Some(pipe_stdout) = pipe_stdout {
             tee(child_stdout, pipe_stdout, TEE_MAX_BYTES)
         } else {
-            use std::io::Read;
-            let mut child_stdout = child_stdout;
-            let mut buf = Vec::new();
-            child_stdout.read_to_end(&mut buf).map(|_| buf)
+            tee(child_stdout, std::io::sink(), TEE_MAX_BYTES)
         }
     });
     let stderr_thread = std::thread::spawn(move || {
         if let Some(pipe_stderr) = pipe_stderr {
             tee(child_stderr, pipe_stderr, TEE_MAX_BYTES)
         } else {
-            use std::io::Read;
-            let mut child_stderr = child_stderr;
-            let mut buf = Vec::new();
-            child_stderr.read_to_end(&mut buf).map(|_| buf)
+            tee(child_stderr, std::io::sink(), TEE_MAX_BYTES)
         }
     });
 
