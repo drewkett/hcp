@@ -1,6 +1,6 @@
 [package]
 name = "hcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Utility for running and subprocess and pinging healthchecks.io with result"
 license = "MIT"
 documentation = "https://github.com/drewkett/hcp"
