@@ -61,7 +61,7 @@ fn tee(mut rdr: impl std::io::Read, mut wrtr: impl std::io::Write, max_bytes: us
 
 /// Run a subprocess and ping healthchecks.io with the result
 #[derive(Parser)]
-#[command(name = "hcp", trailing_var_arg = true)]
+#[command(name = "hcp", version, trailing_var_arg = true)]
 struct Args {
     /// Sets the healthchecks id
     #[arg(long = "hcp-id", env = "HCP_ID")]
