@@ -1,12 +1,13 @@
 use bstr::ByteSlice;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::OsString,
     fmt::Write,
     process::{exit, Command, Stdio},
 };
 
 const EXIT_CODE: i32 = 963;
+const TEE_MAX_BYTES: usize = 40_000;
 
 /// Trims everything after the last '\r' or '\n'
 fn trim_trailing(buf: &[u8]) -> &[u8] {
@@ -17,69 +18,40 @@ fn trim_trailing(buf: &[u8]) -> &[u8] {
         .unwrap_or_default()
 }
 
-#[derive(Default)]
-struct TeeCursor {
-    position: usize,
-    inner: Vec<u8>
-}
-
-impl TeeCursor {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn extend(&mut self, buf: &[u8]) {
-        self.inner.extend(buf)
-    }
-
-    fn remaining(&mut self) -> &[u8] {
-        let pos = self.position.min(self.inner.len());
-        &self.inner[pos..]
-    }
-
-    fn advance(&mut self, n: usize) {
-        self.position += n;
-    }
-
-    fn into_inner(self) -> Vec<u8> {
-        self.inner
-    }
-}
-
-/// This reads the rdr to the end, copies the data to wrtr and returns the data as a Vec
-fn tee(mut rdr: impl std::io::Read, mut wrtr: impl std::io::Write) -> std::io::Result<Vec<u8>> {
-    // Buffer to return which captures all the data from rdr
-    let mut out = TeeCursor::new();
-    // Temporary buffer used for read data
+/// This reads the rdr to the end, copies the data to wrtr and returns the last
+/// TEE_MAX_BYTES of data as a Vec
+fn tee(mut rdr: impl std::io::Read, mut wrtr: impl std::io::Write, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+    let mut tail = VecDeque::new();
+    let mut write_buf = Vec::new();
     let mut buf = [0; 16 * 1024];
     loop {
         match rdr.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 let read_contents = &buf[..n];
-                out.extend(read_contents);
+                tail.extend(read_contents);
+                if tail.len() > max_bytes {
+                    let excess = tail.len() - max_bytes;
+                    tail.drain(..excess);
+                }
+                write_buf.extend_from_slice(read_contents);
                 // Only write contents up to last new line. Since both stdout and
                 // stderr can be writing at the same time, attempt to line buffer
                 // to make output look nicer
-                // remaining is all the data that has been read to out but not yet
-                // written to wrtr
-                let remaining = out.remaining();
-                let to_write = trim_trailing(remaining);
+                let to_write = trim_trailing(&write_buf);
                 if !to_write.is_empty() {
                     wrtr.write_all(to_write)?;
                     let n_written = to_write.len();
-                    out.advance(n_written);
+                    write_buf.drain(..n_written);
                 }
             }
             Err(e) => return Err(e),
         }
     }
-    // The read has finished, so write all remaining data to wrtr if exists
-    let remaining = out.remaining();
-    if !remaining.is_empty() {
-        wrtr.write_all(remaining)?;
+    if !write_buf.is_empty() {
+        wrtr.write_all(&write_buf)?;
     }
-    Ok(out.into_inner())
+    Ok(tail.into())
 }
 
 fn print_help() {
@@ -301,7 +273,7 @@ fn main() {
     // tee_output is enabled forward the output to the processes pipes
     let stdout_thread = std::thread::spawn(move || {
         if let Some(pipe_stdout) = pipe_stdout {
-            tee(child_stdout, pipe_stdout)
+            tee(child_stdout, pipe_stdout, TEE_MAX_BYTES)
         } else {
             use std::io::Read;
             let mut child_stdout = child_stdout;
@@ -311,7 +283,7 @@ fn main() {
     });
     let stderr_thread = std::thread::spawn(move || {
         if let Some(pipe_stderr) = pipe_stderr {
-            tee(child_stderr, pipe_stderr)
+            tee(child_stderr, pipe_stderr, TEE_MAX_BYTES)
         } else {
             use std::io::Read;
             let mut child_stderr = child_stderr;
@@ -394,12 +366,26 @@ mod test {
             let input = input.to_vec();
             let rdr = std::io::Cursor::new(&input);
             let mut out_wrtr = Vec::new();
-            let out_returned = tee(rdr, &mut out_wrtr).unwrap();
+            let out_returned = tee(rdr, &mut out_wrtr, TEE_MAX_BYTES).unwrap();
             assert_eq!(input, out_wrtr);
             assert_eq!(input, out_returned);
         }
         run_test(b"abc\r\ncd\rfd");
         run_test(b"");
         run_test(b"abc");
+    }
+
+    #[test]
+    fn test_tee_large_input_truncates() {
+        let size = TEE_MAX_BYTES + 10_000;
+        let input: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        let rdr = std::io::Cursor::new(&input);
+        let mut out_wrtr = Vec::new();
+        let out_returned = tee(rdr, &mut out_wrtr, TEE_MAX_BYTES).unwrap();
+        // Writer gets all data
+        assert_eq!(input, out_wrtr);
+        // Returned buffer is limited to TEE_MAX_BYTES (the tail)
+        assert_eq!(out_returned.len(), TEE_MAX_BYTES);
+        assert_eq!(out_returned, &input[size - TEE_MAX_BYTES..]);
     }
 }
