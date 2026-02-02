@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     ffi::OsString,
     fmt::Write,
-    process::{exit, Command, Stdio},
+    process::{Command, Stdio, exit},
     time::Duration,
 };
 
@@ -25,7 +25,11 @@ fn trim_trailing(buf: &[u8]) -> &[u8] {
 
 /// This reads the rdr to the end, copies the data to wrtr and returns the last
 /// TEE_MAX_BYTES of data as a Vec
-fn tee(mut rdr: impl std::io::Read, mut wrtr: impl std::io::Write, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+fn tee(
+    mut rdr: impl std::io::Read,
+    mut wrtr: impl std::io::Write,
+    max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
     let mut tail = VecDeque::new();
     let mut write_buf = Vec::new();
     let mut buf = [0; 16 * 1024];
@@ -275,7 +279,9 @@ mod signal {
         }
     }
 
-    pub fn wait_or_kill(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    pub fn wait_or_kill(
+        child: &mut std::process::Child,
+    ) -> std::io::Result<std::process::ExitStatus> {
         let pid = child.id();
         // Check for pending signal before entering wait loop
         check_and_forward(pid);
@@ -330,7 +336,11 @@ fn main() {
         .spawn()
     {
         Ok(p) => p,
-        Err(e) => hc.finish_and_exit(&format!("Failed to spawn process: {}", e), EXIT_HCP_SPAWN, true),
+        Err(e) => hc.finish_and_exit(
+            &format!("Failed to spawn process: {}", e),
+            EXIT_HCP_SPAWN,
+            true,
+        ),
     };
 
     let child_stdout = proc.stdout.take().unwrap();
