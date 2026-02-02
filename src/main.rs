@@ -3,9 +3,13 @@ use std::{
     collections::VecDeque,
     fmt::Write,
     process::{exit, Command, Stdio},
+    time::Duration,
 };
 
-const EXIT_CODE: i32 = 963;
+const EXIT_HCP_SPAWN: i32 = 961;
+const EXIT_HCP_IO: i32 = 962;
+const EXIT_HCP_HTTP: i32 = 963;
+const EXIT_HCP_UNKNOWN: i32 = 964;
 const TEE_MAX_BYTES: usize = 40_000;
 
 /// Trims everything after the last '\r' or '\n'
@@ -73,9 +77,19 @@ hcp [--hcp-id HCP_ID] [--hcp-tee] [--hcp-ignore-code] [cmd [args...]]
     )
 }
 
+fn make_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_recv_body(Some(Duration::from_secs(10)))
+        .timeout_send_body(Some(Duration::from_secs(10)))
+        .build()
+        .new_agent()
+}
+
 mod internal {
-    use super::EXIT_CODE;
-    use std::process::exit;
+    use super::{EXIT_HCP_HTTP, make_agent};
+    use std::{process::exit, thread, time::Duration};
+    use ureq::Agent;
 
     /// Check if buf is only valid hex characters
     fn is_hex(buf: &[u8]) -> bool {
@@ -118,18 +132,31 @@ mod internal {
         }
     }
 
+    /// Returns true if the error is retryable (5xx or connection error)
+    fn is_retryable(err: &ureq::Error) -> bool {
+        match err {
+            ureq::Error::StatusCode(code) => *code >= 500,
+            _ => true,
+        }
+    }
+
     /// A wrapper struct to implement helper functions for pinging healthchecks.io
-    #[derive(Clone, Copy)]
-    pub struct HealthCheck(Uuid);
+    pub struct HealthCheck {
+        uuid: Uuid,
+        agent: Agent,
+    }
 
     impl HealthCheck {
         pub fn from_str(s: &str) -> Option<Self> {
-            Uuid::from_str(s).map(Self)
+            Uuid::from_str(s).map(|uuid| Self {
+                uuid,
+                agent: make_agent(),
+            })
         }
 
         fn base_url(&self) -> String {
             let mut url = "https://hc-ping.com/".to_string();
-            url.push_str(self.0.as_str());
+            url.push_str(self.uuid.as_str());
             url
         }
 
@@ -150,9 +177,19 @@ mod internal {
         }
 
         pub fn start(&self) {
-            if let Err(e) = ureq::get(&self.start_url()).call() {
+            let url = self.start_url();
+            let result = self.agent.get(&url).call().or_else(|e| {
+                if is_retryable(&e) {
+                    eprintln!("Healthcheck /start failed, retrying in 2s: {}", e);
+                    thread::sleep(Duration::from_secs(2));
+                    self.agent.get(&url).call()
+                } else {
+                    Err(e)
+                }
+            });
+            if let Err(e) = result {
                 eprintln!("Error on healthchecks /start call: {}", e);
-                exit(EXIT_CODE)
+                exit(EXIT_HCP_HTTP)
             }
         }
 
@@ -165,9 +202,18 @@ mod internal {
             if log {
                 eprintln!("{}", msg);
             }
-            if let Err(e) = ureq::post(&url).send(msg) {
+            let result = self.agent.post(&url).send(msg).or_else(|e| {
+                if is_retryable(&e) {
+                    eprintln!("Healthcheck finish failed, retrying in 2s: {}", e);
+                    thread::sleep(Duration::from_secs(2));
+                    self.agent.post(&url).send(msg)
+                } else {
+                    Err(e)
+                }
+            });
+            if let Err(e) = result {
                 eprintln!("Error sending finishing request to healthchecks: {}", e);
-                exit(EXIT_CODE)
+                exit(EXIT_HCP_HTTP)
             }
             exit(code)
         }
@@ -200,7 +246,54 @@ mod internal {
 
 use internal::HealthCheck;
 
+#[cfg(unix)]
+mod signal {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    pub static SIGNAL_RECEIVED: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn handler(sig: libc::c_int) {
+        SIGNAL_RECEIVED.store(sig, Ordering::SeqCst);
+    }
+
+    pub fn install_handlers() {
+        unsafe {
+            libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
+            libc::signal(libc::SIGINT, handler as libc::sighandler_t);
+        }
+    }
+
+    pub fn check_and_forward(child_pid: u32) {
+        let sig = SIGNAL_RECEIVED.swap(0, Ordering::SeqCst);
+        if sig != 0 {
+            unsafe {
+                libc::kill(child_pid as libc::pid_t, sig);
+            }
+        }
+    }
+
+    pub fn wait_or_kill(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+        let pid = child.id();
+        // Check for pending signal before entering wait loop
+        check_and_forward(pid);
+
+        // Try waiting with periodic signal checks
+        loop {
+            match child.try_wait()? {
+                Some(status) => return Ok(status),
+                None => {
+                    check_and_forward(pid);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }
+}
+
 fn main() {
+    #[cfg(unix)]
+    signal::install_handlers();
+
     let mut args = std::env::args_os().skip(1);
     let mut hcp_id = std::env::var_os("HCP_ID");
     let mut ignore_code = std::env::var_os("HCP_IGNORE_CODE").is_some();
@@ -249,7 +342,7 @@ fn main() {
         .spawn()
     {
         Ok(p) => p,
-        Err(e) => hc.finish_and_exit(&format!("Failed to spawn process: {}", e), EXIT_CODE, true),
+        Err(e) => hc.finish_and_exit(&format!("Failed to spawn process: {}", e), EXIT_HCP_SPAWN, true),
     };
 
     let child_stdout = proc.stdout.take().unwrap();
@@ -283,13 +376,18 @@ fn main() {
         }
     });
 
-    match proc.wait() {
+    #[cfg(unix)]
+    let wait_result = signal::wait_or_kill(&mut proc);
+    #[cfg(not(unix))]
+    let wait_result = proc.wait();
+
+    match wait_result {
         Ok(status) => {
             let out = match stdout_thread.join() {
                 Ok(Ok(out)) => out,
                 Ok(Err(e)) => hc.finish_and_exit(
                     &format!("Error reading stdout from child: {}", e),
-                    EXIT_CODE,
+                    EXIT_HCP_IO,
                     false,
                 ),
                 Err(e) => std::panic::resume_unwind(e),
@@ -298,7 +396,7 @@ fn main() {
                 Ok(Ok(err)) => err,
                 Ok(Err(e)) => hc.finish_and_exit(
                     &format!("Error reading stderr from child: {}", e),
-                    EXIT_CODE,
+                    EXIT_HCP_IO,
                     false,
                 ),
                 Err(e) => std::panic::resume_unwind(e),
@@ -313,7 +411,7 @@ fn main() {
                 }
                 None => {
                     msg.push_str("Command exited without an exit code\n");
-                    EXIT_CODE
+                    EXIT_HCP_UNKNOWN
                 }
             };
             if !out.is_empty() {
@@ -335,7 +433,7 @@ fn main() {
         }
         Err(e) => {
             let msg = format!("Failed waiting for process: {}", e);
-            hc.finish_and_exit(&msg, EXIT_CODE, true)
+            hc.finish_and_exit(&msg, EXIT_HCP_IO, true)
         }
     }
 }
