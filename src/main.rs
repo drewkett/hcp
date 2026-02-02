@@ -1,6 +1,8 @@
 use bstr::ByteSlice;
+use clap::Parser;
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     fmt::Write,
     process::{exit, Command, Stdio},
     time::Duration,
@@ -57,24 +59,25 @@ fn tee(mut rdr: impl std::io::Read, mut wrtr: impl std::io::Write, max_bytes: us
     Ok(tail.into())
 }
 
-fn print_help() {
-    eprintln!(
-        "\
-hcp [--hcp-id HCP_ID] [--hcp-tee] [--hcp-ignore-code] [cmd [args...]]
+/// Run a subprocess and ping healthchecks.io with the result
+#[derive(Parser)]
+#[command(name = "hcp", trailing_var_arg = true)]
+struct Args {
+    /// Sets the healthchecks id
+    #[arg(long = "hcp-id", env = "HCP_ID")]
+    hcp_id: Option<String>,
 
-    HCP_ID can be set using an environment variable
-    --hcp-id HCP_ID   Sets the healthchecks id. This can also be set using the
-                      environment variable HCP_ID
-    --hcp-ignore-code Ignore the return code from cmd. Also available using HCP_IGNORE_CODE
-    --hcp-tee         Controls whether to also output the cmd stdout/stderr to the local
-                      stdout/stderr. By default the output from the cmd will only get
-                      passed as text to healthchecks. This option can also be enabled
-                      using the environment variable HCP_TEE. Only the existance of the
-                      variable is checked
-    [cmd [args...]]   If no command is passed, the healthcheck will be notified as a
-                      success with the text 'No command given'
-"
-    )
+    /// Also output cmd stdout/stderr to local stdout/stderr
+    #[arg(long = "hcp-tee", env = "HCP_TEE")]
+    hcp_tee: bool,
+
+    /// Ignore the return code from cmd
+    #[arg(long = "hcp-ignore-code", env = "HCP_IGNORE_CODE")]
+    hcp_ignore_code: bool,
+
+    /// Command and arguments to run
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    cmd: Vec<OsString>,
 }
 
 fn make_agent() -> ureq::Agent {
@@ -294,45 +297,30 @@ fn main() {
     #[cfg(unix)]
     signal::install_handlers();
 
-    let mut args = std::env::args_os().skip(1);
-    let mut hcp_id = std::env::var_os("HCP_ID");
-    let mut ignore_code = std::env::var_os("HCP_IGNORE_CODE").is_some();
-    let mut tee_output = std::env::var_os("HCP_TEE").is_some();
-    let cmd = loop {
-        match args.next() {
-            Some(arg) => match arg.to_str() {
-                Some("--hcp-id") => hcp_id = args.next(),
-                Some("--hcp-tee") => tee_output = true,
-                Some("--hcp-ignore-code") => ignore_code = true,
-                _ => break Some(arg),
-            },
-            None => break None,
-        }
-    };
-    let hc = match hcp_id.as_ref() {
-        Some(hcp_id) => match hcp_id.to_str().and_then(HealthCheck::from_str) {
-            Some(hcp_id) => hcp_id,
+    let args = Args::parse();
+    let tee_output = args.hcp_tee;
+    let ignore_code = args.hcp_ignore_code;
+    let hc = match args.hcp_id.as_deref() {
+        Some(hcp_id) => match HealthCheck::from_str(hcp_id) {
+            Some(hc) => hc,
             None => {
-                // Use Path since it already has a Display implementation
-                let hcp_id: &std::path::Path = hcp_id.as_ref();
-                eprintln!("Healthcheck Id isn't a valid uuid '{}'", hcp_id.display());
+                eprintln!("Healthcheck Id isn't a valid uuid '{}'", hcp_id);
                 exit(1);
             }
         },
         None => {
             eprintln!("No Healthcheck Id given");
-            print_help();
             exit(1);
         }
     };
-    let cmd = cmd.or_else(|| args.next());
-    let cmd = match cmd {
+    let mut cmd_args = args.cmd.into_iter();
+    let cmd = match cmd_args.next() {
         Some(cmd) => cmd,
         None => hc.finish_and_exit("No command given", 0, true),
     };
     hc.start();
     let mut proc = match Command::new(cmd)
-        .args(args)
+        .args(cmd_args)
         .env_remove("HCP_ID")
         .env_remove("HCP_TEE")
         .env_remove("HCP_IGNORE_CODE")

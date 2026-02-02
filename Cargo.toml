@@ -13,6 +13,7 @@ edition = "2024"
 
 [dependencies]
 bstr = "1"
+clap = { version = "4", features = ["derive", "env"] }
 ureq = "3"
 
 [target.'cfg(unix)'.dependencies]
