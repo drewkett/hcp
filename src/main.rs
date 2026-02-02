@@ -1,7 +1,6 @@
 use bstr::ByteSlice;
 use std::{
-    collections::{HashMap, VecDeque},
-    ffi::OsString,
+    collections::VecDeque,
     fmt::Write,
     process::{exit, Command, Stdio},
 };
@@ -153,6 +152,7 @@ mod internal {
         pub fn start(&self) {
             if let Err(e) = ureq::get(&self.start_url()).call() {
                 eprintln!("Error on healthchecks /start call: {}", e);
+                exit(EXIT_CODE)
             }
         }
 
@@ -205,10 +205,6 @@ fn main() {
     let mut hcp_id = std::env::var_os("HCP_ID");
     let mut ignore_code = std::env::var_os("HCP_IGNORE_CODE").is_some();
     let mut tee_output = std::env::var_os("HCP_TEE").is_some();
-    // We want to keep all of the environment variables except those
-    let filtered_env: HashMap<OsString, OsString> = std::env::vars_os()
-        .filter(|&(ref k, _)| k != "HCP_ID" && k != "HCP_TEE" && k != "HCP_IGNORE_CODE")
-        .collect();
     let cmd = loop {
         match args.next() {
             Some(arg) => match arg.to_str() {
@@ -244,8 +240,9 @@ fn main() {
     hc.start();
     let mut proc = match Command::new(cmd)
         .args(args)
-        .env_clear()
-        .envs(filtered_env)
+        .env_remove("HCP_ID")
+        .env_remove("HCP_TEE")
+        .env_remove("HCP_IGNORE_CODE")
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
