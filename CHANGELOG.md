@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 - Fix `HCP_TEE` and `HCP_IGNORE_CODE` rejecting values like `1`, which stopped the
   command from running
