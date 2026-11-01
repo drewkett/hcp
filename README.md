@@ -4,11 +4,14 @@ with a non-zero return. It will also include the output from stdout and stderr
 from the command to healthchecks
 
 ```
-hcp [--hcp-id HCP_ID] [--hcp-tee] [--hcp-ignore-code] [cmd [args...]]
+hcp [--hcp-id HCP_ID] [--hcp-url HCP_URL] [--hcp-tee] [--hcp-ignore-code] [cmd [args...]]
 
     HCP_ID can be set using an environment variable
     --hcp-id HCP_ID   Sets the healthchecks id. This can also be set using the
                       environment variable HCP_ID
+    --hcp-url HCP_URL Sets the base url for pings, for self-hosted healthchecks instances
+                      (e.g. https://hc.example.com/ping). Defaults to https://hc-ping.com.
+                      This can also be set using the environment variable HCP_URL
     --hcp-ignore-code Ignore the return code from cmd. Also available using HCP_IGNORE_CODE.
     --hcp-tee         Controls whether to also output the cmd stdout/stderr to the local
                       stdout/stderr. By default the output from the cmd will only get
@@ -35,6 +38,7 @@ The following environment variables are stripped from the child process so they
 are not leaked to the wrapped command:
 
 - `HCP_ID`
+- `HCP_URL`
 - `HCP_TEE`
 - `HCP_IGNORE_CODE`
 

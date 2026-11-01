@@ -17,6 +17,7 @@ const EXIT_HCP_HTTP: i32 = 195;
 const EXIT_HCP_UNKNOWN: i32 = 196;
 const TEE_MAX_BYTES: usize = 40_000;
 const TEE_LINE_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_PING_URL: &str = "https://hc-ping.com";
 
 /// Trims everything after the last '\r' or '\n'
 fn trim_trailing(buf: &[u8]) -> &[u8] {
@@ -79,6 +80,10 @@ struct Args {
     /// Sets the healthchecks id
     #[arg(long = "hcp-id", env = "HCP_ID", hide_env_values = true)]
     hcp_id: Option<String>,
+
+    /// Sets the base url for pings, for self-hosted healthchecks instances
+    #[arg(long = "hcp-url", env = "HCP_URL", default_value = DEFAULT_PING_URL)]
+    hcp_url: String,
 
     /// Also output cmd stdout/stderr to local stdout/stderr
     #[arg(long = "hcp-tee", env = "HCP_TEE", value_parser = OsStringValueParser::new().map(flag_is_on))]
@@ -168,19 +173,22 @@ mod internal {
     /// A wrapper struct to implement helper functions for pinging healthchecks.io
     pub struct HealthCheck {
         uuid: Uuid,
+        ping_url: String,
         agent: Agent,
     }
 
     impl HealthCheck {
-        pub fn from_str(s: &str) -> Option<Self> {
-            Uuid::from_str(s).map(|uuid| Self {
+        pub fn new(uuid: Uuid, ping_url: &str) -> Self {
+            Self {
                 uuid,
+                ping_url: ping_url.trim_end_matches('/').to_string(),
                 agent: make_agent(),
-            })
+            }
         }
 
         fn base_url(&self) -> String {
-            let mut url = "https://hc-ping.com/".to_string();
+            let mut url = self.ping_url.clone();
+            url.push('/');
             url.push_str(self.uuid.as_str());
             url
         }
@@ -269,7 +277,7 @@ mod internal {
     }
 }
 
-use internal::HealthCheck;
+use internal::{HealthCheck, Uuid};
 
 #[cfg(unix)]
 mod signal {
@@ -347,9 +355,13 @@ fn main() {
     let args = Args::parse();
     let tee_output = args.hcp_tee;
     let ignore_code = args.hcp_ignore_code;
+    if !args.hcp_url.starts_with("http://") && !args.hcp_url.starts_with("https://") {
+        eprintln!("Healthcheck url must be http or https '{}'", args.hcp_url);
+        exit(1);
+    }
     let hc = match args.hcp_id.as_deref() {
-        Some(hcp_id) => match HealthCheck::from_str(hcp_id) {
-            Some(hc) => hc,
+        Some(hcp_id) => match Uuid::from_str(hcp_id) {
+            Some(uuid) => HealthCheck::new(uuid, &args.hcp_url),
             None => {
                 eprintln!("Healthcheck Id isn't a valid uuid '{}'", hcp_id);
                 exit(1);
@@ -372,6 +384,7 @@ fn main() {
     let mut proc = match Command::new(cmd)
         .args(cmd_args)
         .env_remove("HCP_ID")
+        .env_remove("HCP_URL")
         .env_remove("HCP_TEE")
         .env_remove("HCP_IGNORE_CODE")
         .stdin(Stdio::inherit())
