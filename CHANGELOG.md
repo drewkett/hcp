@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- Update dependencies, including `ureq` to 3.5.0 and `rustls` to 0.23.46, which pick
+  up TLS security fixes
+
 ## 0.4.1
 
 - Fix `HCP_TEE` and `HCP_IGNORE_CODE` rejecting values like `1`, which stopped the
