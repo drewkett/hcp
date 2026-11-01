@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add `--hcp-url` and `HCP_URL` to set the base url for pings, for self-hosted
+  healthchecks instances
+- Add integration tests that run hcp against a mock ping server
+
 ## 0.4.2
 
 - Update dependencies, including `ureq` to 3.5.0 and `rustls` to 0.23.46, which pick

@@ -37,6 +37,9 @@ jobs:
             os: ubuntu-latest
             rust: nightly
             target: arm-unknown-linux-gnueabihf
+            # The test binary runs under emulation, but the integration tests
+            # need to launch the hcp binary directly, which can't run on x86
+            test_flags: --bins
           - build: macos
             os: macos-latest
             rust: stable
@@ -70,7 +73,7 @@ jobs:
         run: ${{ env.CARGO }} build --verbose ${{ env.TARGET_FLAGS }}
 
       - name: Test
-        run: ${{ env.CARGO }} test --verbose ${{ env.TARGET_FLAGS }}
+        run: ${{ env.CARGO }} test --verbose ${{ env.TARGET_FLAGS }} ${{ matrix.test_flags }}
 
   rustfmt:
     name: rustfmt
