@@ -1,5 +1,8 @@
 use bstr::ByteSlice;
-use clap::Parser;
+use clap::{
+    Parser,
+    builder::{OsStringValueParser, TypedValueParser},
+};
 use std::{
     collections::VecDeque,
     ffi::OsString,
@@ -8,11 +11,12 @@ use std::{
     time::Duration,
 };
 
-const EXIT_HCP_SPAWN: i32 = 961;
-const EXIT_HCP_IO: i32 = 962;
-const EXIT_HCP_HTTP: i32 = 963;
-const EXIT_HCP_UNKNOWN: i32 = 964;
+const EXIT_HCP_SPAWN: i32 = 193;
+const EXIT_HCP_IO: i32 = 194;
+const EXIT_HCP_HTTP: i32 = 195;
+const EXIT_HCP_UNKNOWN: i32 = 196;
 const TEE_MAX_BYTES: usize = 40_000;
+const TEE_LINE_MAX_BYTES: usize = 64 * 1024;
 
 /// Trims everything after the last '\r' or '\n'
 fn trim_trailing(buf: &[u8]) -> &[u8] {
@@ -47,7 +51,12 @@ fn tee(
                 // Only write contents up to last new line. Since both stdout and
                 // stderr can be writing at the same time, attempt to line buffer
                 // to make output look nicer
-                let to_write = trim_trailing(&write_buf);
+                let mut to_write = trim_trailing(&write_buf);
+                // Output without new lines can't be line buffered, so give up
+                // on it once it gets too long instead of buffering it all
+                if to_write.is_empty() && write_buf.len() >= TEE_LINE_MAX_BYTES {
+                    to_write = &write_buf;
+                }
                 if !to_write.is_empty() {
                     wrtr.write_all(to_write)?;
                     let n_written = to_write.len();
@@ -68,15 +77,15 @@ fn tee(
 #[command(name = "hcp", version, trailing_var_arg = true)]
 struct Args {
     /// Sets the healthchecks id
-    #[arg(long = "hcp-id", env = "HCP_ID")]
+    #[arg(long = "hcp-id", env = "HCP_ID", hide_env_values = true)]
     hcp_id: Option<String>,
 
     /// Also output cmd stdout/stderr to local stdout/stderr
-    #[arg(long = "hcp-tee", env = "HCP_TEE")]
+    #[arg(long = "hcp-tee", env = "HCP_TEE", value_parser = OsStringValueParser::new().map(flag_is_on))]
     hcp_tee: bool,
 
     /// Ignore the return code from cmd
-    #[arg(long = "hcp-ignore-code", env = "HCP_IGNORE_CODE")]
+    #[arg(long = "hcp-ignore-code", env = "HCP_IGNORE_CODE", value_parser = OsStringValueParser::new().map(flag_is_on))]
     hcp_ignore_code: bool,
 
     /// Command and arguments to run
@@ -84,8 +93,17 @@ struct Args {
     cmd: Vec<OsString>,
 }
 
+/// Parses the value of a flag's environment variable. Anything that isn't
+/// explicitly false turns the flag on, so that no value can be rejected and stop
+/// the command from running
+fn flag_is_on(value: OsString) -> bool {
+    let value = value.to_string_lossy().to_ascii_lowercase();
+    !matches!(value.as_str(), "0" | "false" | "no" | "off" | "n" | "f")
+}
+
 fn make_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(30)))
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_recv_body(Some(Duration::from_secs(10)))
         .timeout_send_body(Some(Duration::from_secs(10)))
@@ -255,19 +273,42 @@ use internal::HealthCheck;
 
 #[cfg(unix)]
 mod signal {
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     pub static SIGNAL_RECEIVED: AtomicI32 = AtomicI32::new(0);
+    static FORWARDING: AtomicBool = AtomicBool::new(false);
 
-    extern "C" fn handler(sig: libc::c_int) {
-        SIGNAL_RECEIVED.store(sig, Ordering::SeqCst);
+    extern "C" fn handler(
+        sig: libc::c_int,
+        info: *mut libc::siginfo_t,
+        _context: *mut libc::c_void,
+    ) {
+        // With no child to pass the signal to, nothing else would ever act on it
+        if !FORWARDING.load(Ordering::SeqCst) {
+            unsafe { libc::_exit(128 + sig) }
+        }
+        // Signals from the terminal (eg Ctrl-C) have no sending process and already
+        // went to the whole foreground process group including the child, so only
+        // forward ones sent by another process
+        if unsafe { (*info).si_pid() } != 0 {
+            SIGNAL_RECEIVED.store(sig, Ordering::SeqCst);
+        }
     }
 
     pub fn install_handlers() {
         unsafe {
-            libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
-            libc::signal(libc::SIGINT, handler as libc::sighandler_t);
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handler as *const () as libc::sighandler_t;
+            action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
         }
+    }
+
+    /// Sets whether signals are held for the child or make hcp exit immediately
+    pub fn set_forwarding(forwarding: bool) {
+        FORWARDING.store(forwarding, Ordering::SeqCst);
     }
 
     pub fn check_and_forward(child_pid: u32) {
@@ -325,6 +366,9 @@ fn main() {
         None => hc.finish_and_exit("No command given", 0, true),
     };
     hc.start();
+    // Set before spawning so that a signal arriving during the spawn reaches the child
+    #[cfg(unix)]
+    signal::set_forwarding(true);
     let mut proc = match Command::new(cmd)
         .args(cmd_args)
         .env_remove("HCP_ID")
@@ -336,11 +380,15 @@ fn main() {
         .spawn()
     {
         Ok(p) => p,
-        Err(e) => hc.finish_and_exit(
-            &format!("Failed to spawn process: {}", e),
-            EXIT_HCP_SPAWN,
-            true,
-        ),
+        Err(e) => {
+            #[cfg(unix)]
+            signal::set_forwarding(false);
+            hc.finish_and_exit(
+                &format!("Failed to spawn process: {}", e),
+                EXIT_HCP_SPAWN,
+                true,
+            )
+        }
     };
 
     let child_stdout = proc.stdout.take().unwrap();
@@ -378,6 +426,11 @@ fn main() {
     let wait_result = signal::wait_or_kill(&mut proc);
     #[cfg(not(unix))]
     let wait_result = proc.wait();
+
+    // The child is gone, but its output pipes can stay open if it left background
+    // processes running, so a signal needs to be able to interrupt the rest of this
+    #[cfg(unix)]
+    signal::set_forwarding(false);
 
     match wait_result {
         Ok(status) => {
@@ -474,5 +527,50 @@ mod test {
         // Returned buffer is limited to TEE_MAX_BYTES (the tail)
         assert_eq!(out_returned.len(), TEE_MAX_BYTES);
         assert_eq!(out_returned, &input[size - TEE_MAX_BYTES..]);
+    }
+
+    #[test]
+    fn test_tee_flushes_long_lines() {
+        #[derive(Default)]
+        struct CountingWriter {
+            data: Vec<u8>,
+            writes: usize,
+        }
+
+        impl std::io::Write for &mut CountingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.data.extend_from_slice(buf);
+                self.writes += 1;
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let input = vec![b'a'; TEE_LINE_MAX_BYTES * 4];
+        let mut wrtr = CountingWriter::default();
+        tee(std::io::Cursor::new(&input), &mut wrtr, TEE_MAX_BYTES).unwrap();
+        assert_eq!(input, wrtr.data);
+        // Writing only once would mean it was all buffered until the end of input
+        assert!(wrtr.writes >= 4);
+    }
+
+    #[test]
+    fn test_flag_is_on() {
+        for value in ["", "1", "true", "yes", "foo"] {
+            assert!(flag_is_on(value.into()), "{:?}", value);
+        }
+        for value in ["0", "false", "FALSE", "no", "off", "n", "f"] {
+            assert!(!flag_is_on(value.into()), "{:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_args() {
+        let args = Args::try_parse_from(["hcp", "--hcp-tee", "ls", "--hcp-tee"]).unwrap();
+        assert!(args.hcp_tee);
+        assert_eq!(args.cmd, ["ls", "--hcp-tee"]);
     }
 }

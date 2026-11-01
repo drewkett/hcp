@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Fix `HCP_TEE` and `HCP_IGNORE_CODE` rejecting values like `1`, which stopped the
+  command from running
+- Add an overall timeout to HTTP requests, which could hang forever if the server
+  stopped responding
+- Exit on SIGTERM and SIGINT when there is no child to forward them to
+- Stop forwarding signals from the terminal, which the child gets directly
+- Change hcp's own exit codes from 961-964 to 193-196, which is what they already
+  came out as on unix
+- Stop buffering all output that has no new lines
+- Hide the value of `HCP_ID` in `--help`
+- Add clippy to CI and add Dependabot config
+
 ## 0.4.0
 
 - Add crates.io publish job to release workflow

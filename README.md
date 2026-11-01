@@ -9,12 +9,11 @@ hcp [--hcp-id HCP_ID] [--hcp-tee] [--hcp-ignore-code] [cmd [args...]]
     HCP_ID can be set using an environment variable
     --hcp-id HCP_ID   Sets the healthchecks id. This can also be set using the
                       environment variable HCP_ID
-    --hcp-ignore-code Ignore the return code from cmd. Also available using HCP_IGNORE_CODE
+    --hcp-ignore-code Ignore the return code from cmd. Also available using HCP_IGNORE_CODE.
     --hcp-tee         Controls whether to also output the cmd stdout/stderr to the local
                       stdout/stderr. By default the output from the cmd will only get
                       passed as text to healthchecks. This option can also be enabled
-                      using the environment variable HCP_TEE. Only the existance of the
-                      variable is checked
+                      using the environment variable HCP_TEE.
     [cmd [args...]]   If no command is passed, the healthcheck will be notified as a
                       success with the text 'No command given'
 ```
@@ -29,6 +28,9 @@ cargo install hcp
 
 # Environment variables
 
+`HCP_TEE` and `HCP_IGNORE_CODE` turn their option on when set to anything other
+than `0`, `false`, `no`, `off`, `n` or `f` (case insensitive).
+
 The following environment variables are stripped from the child process so they
 are not leaked to the wrapped command:
 
@@ -42,16 +44,19 @@ When hcp itself encounters an error it exits with one of these codes:
 
 | Code | Meaning |
 |------|---------|
-| 961  | Failed to spawn the child process |
-| 962  | I/O error reading child output |
-| 963  | Healthcheck HTTP request failed |
-| 964  | Child exited without an exit code (e.g. killed by signal) |
+| 193  | Failed to spawn the child process |
+| 194  | I/O error reading child output |
+| 195  | Healthcheck HTTP request failed |
+| 196  | Child exited without an exit code (e.g. killed by signal) |
 
 If the child process exits normally, hcp forwards its exit code (unless
 `--hcp-ignore-code` is set, in which case it exits 0).
 
 hcp will exit immediately if the healthcheck HTTP request to `/start` fails.
-HTTP requests are retried once after a 2-second delay on 5xx or connection
-errors.
+HTTP requests time out after 30 seconds and are retried once after a 2-second
+delay on 5xx or connection errors.
 
-On unix, SIGTERM and SIGINT are forwarded to the child process.
+On unix, SIGTERM and SIGINT are forwarded to the child process while it is
+running, unless they came from the terminal (e.g. Ctrl-C), which already delivers
+them to the child. At any other time they make hcp exit immediately with code
+128 + the signal number, without sending a finish ping.
