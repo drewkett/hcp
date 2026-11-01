@@ -141,7 +141,12 @@ fn read_request(stream: &mut impl Read) -> Request {
 fn no_command_pings_success_without_start() {
     let server = MockServer::start(&[]);
     let output = server.run(&[]);
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(server.paths(), [finish_path()]);
     assert_eq!(server.last_body(), "No command given");
 }
