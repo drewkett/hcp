@@ -102,13 +102,18 @@ jobs:
             echo "ASSET_NAME=hcp-${{ matrix.target }}-${{ env.BIN_VERSION }}" >> $GITHUB_ENV
           fi
 
+      - name: Rename release binary
+        shell: bash
+        run: cp "${{ env.ASSET_PATH }}" "${{ env.ASSET_NAME }}"
+
       - name: Upload release archive
         uses: softprops/action-gh-release@v3
         with:
-          files: ${{ env.ASSET_PATH }}
+          files: ${{ env.ASSET_NAME }}
 
   publish-crate:
     name: publish-crate
+    needs: build-release
     runs-on: ubuntu-latest
     if: "!contains(github.ref, 'dev') && !contains(github.ref, 'alpha')"
     steps:

@@ -13,6 +13,8 @@
 - Stop buffering all output that has no new lines
 - Hide the value of `HCP_ID` in `--help`
 - Add clippy to CI and add Dependabot config
+- Fix release binaries overwriting each other, which left only `hcp` and `hcp.exe`
+- Only publish to crates.io after all release builds succeed
 
 ## 0.4.0
 
